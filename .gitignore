@@ -1,0 +1,46 @@
+# Unity-generated folders (rebuilt automatically when the project is opened)
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Mm]emoryCaptures/
+/[Rr]ecordings/
+
+# Unity crash-recovery scene backups
+/[Aa]ssets/_Recovery/
+/[Aa]ssets/_Recovery.meta
+
+# IDE and generated project files
+.vs/
+.vscode/
+.idea/
+*.csproj
+*.sln
+*.slnx
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+*.pidb.meta
+*.pdb.meta
+*.mdb.meta
+
+# Build outputs
+*.apk
+*.aab
+*.unitypackage
+*.app
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

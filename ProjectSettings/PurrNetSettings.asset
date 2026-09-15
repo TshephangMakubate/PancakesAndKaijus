@@ -1,8 +1,0 @@
-{
-  "stripCodeMode": 0,
-  "guardFailureAction": 0,
-  "reflectionCachePath": "Assets/PurrNet/ReflectionRPCTargets.txt",
-  "toolbarMode": 0,
-  "toolbarTransportDropDown": false,
-  "stripServerCode": false
-}

@@ -235,6 +235,8 @@ public class WaffleController : MonoBehaviour
         transform.position = landWorld;
         transform.rotation = landRotation;
 
+        
+
         yield return LandingSquash(baseScale);
         transform.localScale = baseScale;
     }

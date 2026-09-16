@@ -168,6 +168,7 @@ public class WaffleStack : MonoBehaviour
         GameObject instance = SpawnWaffle(_panSpawnPoint.position);
         WaffleController waffle = instance.GetComponent<WaffleController>();
         waffle?.SetRaw(config);
+        SoundManager.Instance.PlaySFX("sizzle");
         return instance;
     }
 
@@ -192,7 +193,17 @@ public class WaffleStack : MonoBehaviour
 
         if (waffle != null)
         {
+            if(burned)
+            {
+                SoundManager.Instance.PlaySFX("error");
+            }
+            else
+            {
+                SoundManager.Instance.PlaySFX("success");
+            }
+
             yield return waffle.FlipToPlate(instance.transform.position, landPosition, landRotation, _flipHeight, FlipDuration, spins);
+            SoundManager.Instance.PlaySFX("plop");
         }
         else
         {
@@ -286,6 +297,7 @@ public class WaffleStack : MonoBehaviour
             Instance = instance,
             RestPosition = restPosition,
             RestRotation = restRotation
+            
         });
         _wobbleEnergy = Mathf.Min(1f, _wobbleEnergy + _landWobbleImpulse);
     }

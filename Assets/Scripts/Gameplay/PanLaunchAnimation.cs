@@ -201,6 +201,8 @@ public class PanLaunchAnimation : MonoBehaviour
         _pancake.localRotation = _restLocalRotation;
         _pancake.localScale = _restLocalScale * pulse;
 
+        
+
         if (_panRoot != null)
         {
             _panRoot.localRotation = _panRestRotation * Quaternion.Euler(-damped * _panFlipAngle * 0.2f, 0f, 0f);

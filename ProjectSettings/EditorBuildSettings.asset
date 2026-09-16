@@ -6,6 +6,9 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
+    path: Assets/Scenes/MenuScene.unity
+    guid: a6bdd5b270b380043b31125c7b55c64e
+  - enabled: 1
     path: Assets/Scenes/Cook And Decorate Scene.unity
     guid: 42834b5ece8509f40a5c91a7a6f13c42
   - enabled: 1

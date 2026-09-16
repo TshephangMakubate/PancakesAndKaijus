@@ -84,6 +84,19 @@ public class HUDController : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Shows one team's serving score and plates left. Team 0 uses the upper
+    /// readout and team 1 the one beneath it.
+    /// </summary>
+    public void SetTeamServing(int teamIndex, string teamName, int score, int platesLeft)
+    {
+        TextMeshProUGUI target = teamIndex == 0 ? _waffleCountText : _accuracyText;
+        if (target != null)
+        {
+            target.text = $"{teamName}: {score}  ({platesLeft} left)";
+        }
+    }
+
     /// <summary>Sets the running accuracy display as a percentage.</summary>
     public void SetAccuracy(float pct)
     {

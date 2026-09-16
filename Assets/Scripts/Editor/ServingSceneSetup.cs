@@ -6,7 +6,7 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
-/// <summary>Builds the Round 3 serving scene: a long gingham table with a halfway bar, four customers, your launch spot, the idle opponent plates, and the HUD.</summary>
+/// <summary>Builds the Round 3 serving scene: a wide gingham table with a halfway bar, four customer seats, a launch pad per player (two red, two blue), a camera that frames the table to fill the screen, and the HUD.</summary>
 public static class ServingSceneSetup
 {
     private const string ServingScenePath = "Assets/Scenes/Serving Scene.unity";
@@ -16,7 +16,8 @@ public static class ServingSceneSetup
     private const string GameConfigPath = "Assets/Settings/GameConfig.asset";
     private const string LitShaderName = "Universal Render Pipeline/Lit";
 
-    private const float TableHalfWidth = 4.5f;
+    // Wide enough for four stations side by side along the near edge.
+    private const float TableHalfWidth = 7f;
     private const float TableHalfLength = 12f;
     private const float HalfwayHalfDepth = 0.75f;
     private const float CustomerZoneDepth = 3.5f;
@@ -25,8 +26,14 @@ public static class ServingSceneSetup
     private const float CameraFieldOfView = 55f;
     private const int SlothIndex = 3;
 
-    private static readonly Vector3 LaunchPosition = new Vector3(-1.4f, 0f, -10f);
-    private static readonly Vector3[] OpponentPlatePositions = { new Vector3(1.4f, 0f, -10f), new Vector3(1.4f, 0f, 2.5f) };
+    // One pad per player, in the order ServingManager expects: Red P1, Red P2, Blue P1, Blue P2.
+    private static readonly Vector3[] LaunchPositions =
+    {
+        new Vector3(-5.25f, 0f, -10f),
+        new Vector3(-1.75f, 0f, -10f),
+        new Vector3(1.75f, 0f, -10f),
+        new Vector3(5.25f, 0f, -10f)
+    };
     private static readonly Vector3 CameraPosition = new Vector3(0f, 19f, -19.5f);
     private static readonly Vector3 CameraTarget = new Vector3(0f, 0f, 1f);
 
@@ -83,13 +90,17 @@ public static class ServingSceneSetup
         Transform table = BuildTable();
         CustomerZone[] customers = BuildCustomers(table);
 
-        Transform launchSpot = CreateSpot("LaunchSpot", table, LaunchPosition, SaveMaterial("LaunchPadRed", new Color(0.95f, 0.55f, 0.55f)));
+        Material redPad = SaveMaterial("LaunchPadRed", new Color(0.95f, 0.55f, 0.55f));
         Material bluePad = SaveMaterial("LaunchPadBlue", new Color(0.55f, 0.65f, 0.95f));
-        var opponentSpots = new Transform[OpponentPlatePositions.Length];
-        for (int i = 0; i < OpponentPlatePositions.Length; i++)
+        var launchSpots = new Transform[LaunchPositions.Length];
+        for (int i = 0; i < LaunchPositions.Length; i++)
         {
-            opponentSpots[i] = CreateSpot($"OpponentSpot{i + 1}", table, OpponentPlatePositions[i], bluePad);
+            bool red = i < 2;
+            string name = $"{(red ? "Red" : "Blue")}P{i % 2 + 1}Spot";
+            launchSpots[i] = CreateSpot(name, table, LaunchPositions[i], red ? redPad : bluePad);
         }
+
+        FitCamera(scene, table);
 
         HUDController hud = BuildHud();
 
@@ -99,17 +110,17 @@ public static class ServingSceneSetup
 
         var settings = new SerializedObject(manager);
         DecoratingSceneSetup.Assign(settings, "_config", AssetDatabase.LoadAssetAtPath<GameConfig>(GameConfigPath));
+        DecoratingSceneSetup.Assign(settings, "_sequenceConfig", SequenceSceneFactory.LoadConfig());
         DecoratingSceneSetup.Assign(settings, "_hud", hud);
         DecoratingSceneSetup.Assign(settings, "_decorator", decorator);
-        DecoratingSceneSetup.Assign(settings, "_launchSpot", launchSpot);
         DecoratingSceneSetup.Assign(settings, "_tableCenter", table);
         DecoratingSceneSetup.Assign(settings, "_pancakePrefab", AssetDatabase.LoadAssetAtPath<GameObject>(PancakePrefabPath));
-        DecoratingSceneSetup.Assign(settings, "_teamPlateMaterial", SaveMaterial("PlateRed", new Color(0.82f, 0.22f, 0.3f)));
-        DecoratingSceneSetup.Assign(settings, "_opponentPlateMaterial", SaveMaterial("PlateBlue", new Color(0.2f, 0.3f, 0.75f)));
+        DecoratingSceneSetup.Assign(settings, "_redPlateMaterial", SaveMaterial("PlateRed", new Color(0.82f, 0.22f, 0.3f)));
+        DecoratingSceneSetup.Assign(settings, "_bluePlateMaterial", SaveMaterial("PlateBlue", new Color(0.2f, 0.3f, 0.75f)));
         DecoratingSceneSetup.Assign(settings, "_plateWellMaterial", SaveMaterial("PlateWell", new Color(0.97f, 0.95f, 0.9f)));
         settings.FindProperty("_tableHalfSize").vector2Value = new Vector2(TableHalfWidth, TableHalfLength);
         AssignArray(settings, "_customers", customers);
-        AssignArray(settings, "_opponentPlateSpots", opponentSpots);
+        AssignArray(settings, "_launchSpots", launchSpots);
         settings.ApplyModifiedPropertiesWithoutUndo();
 
         AssetDatabase.SaveAssets();
@@ -139,6 +150,24 @@ public static class ServingSceneSetup
             {
                 light.transform.rotation = Quaternion.Euler(55f, -25f, 0f);
             }
+        }
+    }
+
+    /// <summary>Adds the fitter that sizes the view to the table; it re-solves at runtime for the real screen.</summary>
+    private static void FitCamera(Scene scene, Transform table)
+    {
+        foreach (GameObject root in scene.GetRootGameObjects())
+        {
+            Camera camera = root.GetComponent<Camera>();
+            if (camera == null)
+            {
+                continue;
+            }
+
+            ServingCameraFit fit = root.AddComponent<ServingCameraFit>();
+            fit.Configure(table, new Vector2(TableHalfWidth, TableHalfLength));
+            fit.Fit();
+            return;
         }
     }
 

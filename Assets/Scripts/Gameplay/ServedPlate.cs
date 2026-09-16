@@ -27,6 +27,9 @@ public class ServedPlate : MonoBehaviour
     /// <summary>The pancake this plate carries.</summary>
     public PancakeRecord Record { get; private set; }
 
+    /// <summary>The team that slid this plate, or -1 for an idle obstacle plate.</summary>
+    public int TeamIndex { get; private set; } = -1;
+
     public bool IsLaunched { get; private set; }
 
     /// <summary>True once a customer has taken this plate; it then stays put.</summary>
@@ -46,9 +49,10 @@ public class ServedPlate : MonoBehaviour
         _body = GetComponent<Rigidbody>();
     }
 
-    public void Init(PancakeRecord record, Vector3 tableCenter, Vector2 tableHalfSize)
+    public void Init(PancakeRecord record, Vector3 tableCenter, Vector2 tableHalfSize, int teamIndex = -1)
     {
         Record = record;
+        TeamIndex = teamIndex;
         _tableCenter = tableCenter;
         _tableHalfSize = tableHalfSize;
     }

@@ -6,14 +6,27 @@ using UnityEngine.SceneManagement;
 
 /// <summary>
 /// Orchestrates the cooking match as a finite state machine driving the
-/// 30s-per-round Simon-says cooking loop. With a <see cref="PancakeDecorator"/>
+/// 30s-per-round cooking loop. With a <see cref="PancakeDecorator"/>
 /// assigned, each pancake is also decorated in the pan as it cooks and every
 /// cooking round plays here; otherwise the cooked pancakes are handed to the
 /// decorating scene. Afterwards the pancakes move on to the serving round.
-/// Per-player state lives in <see cref="PlayerSession"/>.
+/// <para>
+/// Each pancake is now earned by completing one co-op token sequence on
+/// <see cref="SequenceMatchRunner"/> rather than by copying a Simon-says
+/// pattern. This manager still owns the pacing: it deals a sequence, keeps the
+/// team on it until they land it, and plays the pan and stack beats.
+/// </para>
 /// </summary>
 public class GameManager : MonoBehaviour
 {
+    /// <summary>How the team's current sequence ended.</summary>
+    private enum SequenceOutcome
+    {
+        Pending,
+        Completed,
+        TimedOut
+    }
+
     /// <summary>High-level match phases.</summary>
     public enum GameState
     {
@@ -42,14 +55,21 @@ public class GameManager : MonoBehaviour
     private const string TimesUpMessage = "Time's up!";
     private const string MoveActionPath = "Player/Move";
 
+    // The cooking scene is played by team A; team B's station is enabled from
+    // SequenceConfig once four players are available.
+    private const int CookingTeamIndex = 0;
+
     // Up, over the chef's shoulder, and into the background.
     private static readonly Vector3 ThrowAwayVelocity = new Vector3(-3f, 8f, 4f);
 
     [Header("Config & Systems")]
     [SerializeField] private GameConfig _config;
     [SerializeField] private InputActionAsset _inputActions;
+    [Tooltip("Hosts the co-op token sequences. Leave its Auto Deal off so this manager controls the pacing.")]
+    [SerializeField] private SequenceMatchRunner _sequenceRunner;
 
     [Header("Presentation")]
+    [Tooltip("Legacy Simon-says arrow display. No longer driven - the token stations replaced it. Kept so existing scene wiring is not lost.")]
     [SerializeField] private SequenceDisplay _sequenceDisplay;
     [SerializeField] private HUDController _hud;
     [SerializeField] private PanController _pan;
@@ -61,8 +81,6 @@ public class GameManager : MonoBehaviour
     [Tooltip("Assign to top each pancake in the pan as it cooks and play every cooking round in this scene. Leave empty to hand off to the decorating scene.")]
     [SerializeField] private PancakeDecorator _decorator;
 
-    private readonly SequenceGenerator _generator = new SequenceGenerator();
-    private readonly AccuracyScorer _scorer = new AccuracyScorer();
     private readonly List<PlayerSession> _sessions = new List<PlayerSession>();
     private readonly List<PancakeRecord> _cookedPancakes = new List<PancakeRecord>();
 
@@ -70,16 +88,12 @@ public class GameManager : MonoBehaviour
     private float _roundTimer;
     private int _roundIndex;
 
-    // Input capture state for the current sequence.
-    private readonly List<Direction> _enteredInputs = new List<Direction>();
-    private bool _capturingInput;
+    // How the sequence in play ended, polled by the round loop.
+    private SequenceOutcome _outcome = SequenceOutcome.Pending;
 
-    // The sequence the player is currently trying to copy, used to detect
-    // wrong presses for feedback (screen shake) and burning the waffle.
-    private List<Direction> _currentTarget;
-
-    // True once any press in the current sequence missed the expected step.
-    private bool _hadWrongPress;
+    // Wrong presses made on the pancake in the pan, across every attempt at its
+    // sequence. This is what sets the bake quality.
+    private int _wrongPresses;
 
     // When true, the round timer counts down every frame regardless of phase.
     private bool _roundActive;
@@ -118,48 +132,60 @@ public class GameManager : MonoBehaviour
         }
 
         _hud?.SetTimer(_roundTimer);
+        PushRoundTimerToStations();
+    }
+
+    /// <summary>
+    /// Drives the bar on each television from the round's clock. The stations
+    /// have no notion of a round, so the reading has to be pushed to them; what
+    /// the bar shows is the time left to cook, not the time left on one row.
+    /// </summary>
+    private void PushRoundTimerToStations()
+    {
+        if (_sequenceRunner == null || _config == null || _config.RoundDurationSeconds <= 0f)
+        {
+            return;
+        }
+
+        _sequenceRunner.SetRoundTimer(_roundTimer, _config.RoundDurationSeconds);
     }
 
     private void OnDestroy()
     {
-        for (int i = 0; i < _sessions.Count; i++)
+        if (_sequenceRunner != null)
         {
-            PlayerSession session = _sessions[i];
-            if (session?.Input != null)
-            {
-                session.Input.OnDirectionPressed -= OnDirectionPressed;
-                session.Input.Disable();
-            }
+            _sequenceRunner.OnTeamSequenceComplete -= HandleSequenceComplete;
+            _sequenceRunner.OnTeamTimeout -= HandleSequenceTimeout;
+            _sequenceRunner.OnTeamTokenCompleted -= HandleTokenCompleted;
+            _sequenceRunner.OnTeamWrongPress -= HandleWrongPress;
         }
     }
 
+    /// <summary>
+    /// Creates the session that records the cooking team's output. The team's
+    /// two players share one record because everything downstream — the waffle
+    /// stack, <see cref="PancakeCarryover"/> and the serving round — is scored
+    /// per team, not per person.
+    /// </summary>
     private void SetupSessions()
     {
         _sessions.Clear();
+        _sessions.Add(new PlayerSession(0));
 
-        InputAction moveAction = ResolveMoveAction();
-        var reader = new DirectionalInputReader(moveAction);
-        var session = new PlayerSession(0, reader);
-        reader.OnDirectionPressed += OnDirectionPressed;
-        reader.Enable();
-        _sessions.Add(session);
-    }
-
-    private InputAction ResolveMoveAction()
-    {
-        if (_inputActions == null)
+        if (_sequenceRunner == null)
         {
-            Debug.LogError("GameManager: InputActionAsset is not assigned.");
-            return null;
+            Debug.LogError("GameManager: SequenceMatchRunner is not assigned; no input will reach the game.");
+            return;
         }
 
-        InputAction action = _inputActions.FindAction(MoveActionPath, false);
-        if (action == null)
-        {
-            Debug.LogError($"GameManager: Could not find action '{MoveActionPath}'.");
-        }
+        // The round clock is the only timer here: a row never times out and a
+        // wrong press leaves the team on the token they missed.
+        _sequenceRunner.UseRoundClockOnly();
 
-        return action;
+        _sequenceRunner.OnTeamSequenceComplete += HandleSequenceComplete;
+        _sequenceRunner.OnTeamTimeout += HandleSequenceTimeout;
+        _sequenceRunner.OnTeamTokenCompleted += HandleTokenCompleted;
+        _sequenceRunner.OnTeamWrongPress += HandleWrongPress;
     }
 
     private IEnumerator RunMatch()
@@ -183,6 +209,12 @@ public class GameManager : MonoBehaviour
             _hud?.ShowBanner(TimesUpMessage);
             yield return new WaitForSeconds(TimesUpSeconds);
             _hud?.HideMessage();
+
+            // A first-to-N match is over the moment a team hits the target.
+            if (MatchDecided)
+            {
+                break;
+            }
         }
 
         PlayerSession session = _sessions.Count > 0 ? _sessions[0] : null;
@@ -232,6 +264,11 @@ public class GameManager : MonoBehaviour
         _hud?.SetRound(roundIndex, _config.DisplayedRoundCount);
         _hud?.SetTimer(_config.RoundDurationSeconds);
 
+        // Show the bar full behind the banner rather than wherever the last
+        // round left it.
+        _roundTimer = _config.RoundDurationSeconds;
+        PushRoundTimerToStations();
+
         bool finalRound = roundIndex == _config.DisplayedRoundCount - 1 && _config.DisplayedRoundCount > 1;
         _hud?.ShowBanner(finalRound ? FinalRoundMessage : $"Round {roundIndex + 1}");
         yield return new WaitForSeconds(RoundBannerSeconds);
@@ -252,42 +289,52 @@ public class GameManager : MonoBehaviour
         _hud?.SetRound(roundIndex, _config.DisplayedRoundCount);
         _hud?.SetWaffleCount(session?.TotalWaffles ?? 0);
         _hud?.SetTimer(_roundTimer);
-
-        int sequenceLength = _config.GetSequenceLength(roundIndex);
+        PushRoundTimerToStations();
 
         _roundActive = true;
+        _sequenceRunner?.StartRound();
 
-        while (_roundTimer > 0f)
+        while (_roundTimer > 0f && !MatchDecided)
         {
             if (DecoratesInPan)
             {
                 yield return PreparePanPancake();
             }
 
-            // SequenceShow. The round timer keeps ticking (see Update) so the
-            // reveal counts against the round's clock, and time running out
-            // cuts the reveal short.
-            _state = GameState.SequenceShow;
-            List<Direction> target = _generator.Generate(sequenceLength);
-            _currentTarget = target;
-            if (_sequenceDisplay != null && _roundTimer > 0f)
-            {
-                _sequenceDisplay.Begin(target, _config.StepDisplaySeconds);
-                while (_sequenceDisplay.IsPlaying && _roundTimer > 0f)
-                {
-                    yield return null;
-                }
-            }
-
             if (_roundTimer <= 0f)
             {
-                _sequenceDisplay?.Stop();
                 break;
             }
 
-            // PlayerInput.
+            // SequenceShow. The whole row is visible from the moment it is
+            // dealt, so there is no playback to wait through — the round clock
+            // is the pressure.
+            _state = GameState.SequenceShow;
+            _wrongPresses = 0;
+            _sequenceRunner?.DealTo(CookingTeamIndex);
+
+            // PlayerInput. The pancake in the pan belongs to this row until the
+            // team lands it. A wrong press keeps them on the token they missed,
+            // so the only thing that takes a pancake away from them is the
+            // round clock running out (see Update).
             _state = GameState.PlayerInput;
-            yield return CollectInput(target.Count);
+            while (_roundTimer > 0f)
+            {
+                _outcome = SequenceOutcome.Pending;
+                while (_outcome == SequenceOutcome.Pending && _roundTimer > 0f)
+                {
+                    yield return null;
+                }
+
+                if (_outcome != SequenceOutcome.TimedOut)
+                {
+                    break;
+                }
+
+                // Only reachable if the row clock was turned back on: put the
+                // same row back rather than hand the pancake a free pass.
+                _sequenceRunner?.RedealTo(CookingTeamIndex);
+            }
 
             if (_roundTimer <= 0f)
             {
@@ -296,17 +343,15 @@ public class GameManager : MonoBehaviour
 
             // Resolve.
             _state = GameState.Resolve;
-            float accuracy = _scorer.Score(target, _enteredInputs, _config);
-
-            // A single failed press burns the waffle regardless of overall score.
-            bool burned = _hadWrongPress;
+            bool ruined = _wrongPresses >= _config.MistakesBeforeRuined;
+            float accuracy = BakeQuality(_wrongPresses);
 
             // The waffle cooking in the pan reflects the latest bake.
-            _waffle?.SetCharLevel(accuracy, _config, burned);
+            _waffle?.SetCharLevel(accuracy, _config, ruined);
 
             if (DecoratesInPan)
             {
-                FinishToppings(accuracy);
+                FinishToppings(ruined, accuracy);
             }
 
             // Kick off the pan's flip gesture and the whimsical serve together.
@@ -315,8 +360,8 @@ public class GameManager : MonoBehaviour
             if (_waffleStack != null)
             {
                 yield return _panPancake != null
-                    ? _waffleStack.LaunchWaffle(_panPancake, accuracy, _config, burned)
-                    : _waffleStack.ProduceWaffle(accuracy, _config, burned);
+                    ? _waffleStack.LaunchWaffle(_panPancake, accuracy, _config, ruined)
+                    : _waffleStack.ProduceWaffle(accuracy, _config, ruined);
             }
             else if (_pan == null)
             {
@@ -331,7 +376,7 @@ public class GameManager : MonoBehaviour
                 yield return panTilt;
             }
 
-            _cookedPancakes.Add(new PancakeRecord(accuracy, burned));
+            _cookedPancakes.Add(new PancakeRecord(accuracy, ruined));
             session?.RecordWaffle(accuracy, roundIndex);
 
             if (session != null)
@@ -344,9 +389,35 @@ public class GameManager : MonoBehaviour
         // A pancake still in the pan when time runs out was never finished.
         ThrowAwayPanPancake();
 
+        _sequenceRunner?.StopRound();
         _roundActive = false;
         _state = GameState.RoundEnd;
     }
+
+    // Worst a pancake can score while still being under the mistake budget. It
+    // sits clear of WaffleController's cooked threshold, which is what keeps a
+    // one- or two-mistake pancake golden.
+    private const float ShakyBakeQuality = 0.7f;
+
+    /// <summary>
+    /// Turns the pancake's mistake count into the 0..1 bake quality the pan,
+    /// stack and serving round already speak. Quality slides down across the
+    /// mistake budget and only falls off the cliff once the budget is spent, so
+    /// nothing short of the third mistake ruins a pancake.
+    /// </summary>
+    private float BakeQuality(int wrongPresses)
+    {
+        int budget = _config.MistakesBeforeRuined;
+        if (wrongPresses >= budget)
+        {
+            return 0f;
+        }
+
+        return Mathf.Lerp(1f, ShakyBakeQuality, wrongPresses / (float)budget);
+    }
+
+    /// <summary>True once a first-to-N match has been won.</summary>
+    private bool MatchDecided => _sequenceRunner?.Match?.IsDecided ?? false;
 
     /// <summary>Plops a raw pancake into the pan and readies it to collect toppings.</summary>
     private IEnumerator PreparePanPancake()
@@ -371,21 +442,27 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    private void FinishToppings(float accuracy)
+    /// <summary>
+    /// Finishes the pancake in the pan. Only a ruined one gets its toppings
+    /// thrown about; a shaky-but-saved pancake simply goes without the cherry.
+    /// </summary>
+    private void FinishToppings(bool ruined, float accuracy)
     {
-        if (_panToppings == null || _currentTarget == null)
+        if (_panToppings == null)
         {
             return;
         }
 
-        bool perfect = !_hadWrongPress && _enteredInputs.Count == _currentTarget.Count;
-        if (perfect)
-        {
-            _decorator.AddCherry(_panToppings, _panFrame);
-        }
-        else
+        if (ruined)
         {
             _decorator.Jumble(_panToppings, Mathf.Lerp(0.35f, 1f, 1f - accuracy));
+            return;
+        }
+
+        // A clean run through the whole sequence earns the cherry.
+        if (_wrongPresses == 0)
+        {
+            _decorator.AddCherry(_panToppings, _panFrame);
         }
     }
 
@@ -401,65 +478,63 @@ public class GameManager : MonoBehaviour
         _panToppings = null;
     }
 
-    private IEnumerator CollectInput(int requiredCount)
+    /// <summary>Each resolved token drops a topping onto the pancake in the pan.</summary>
+    private void HandleTokenCompleted(int teamIndex, int slot, int playerIndex)
     {
-        _enteredInputs.Clear();
-        _hadWrongPress = false;
-        _capturingInput = true;
-
-        float window = _config.InputWindowSeconds;
-        float elapsed = 0f;
-
-        while (_capturingInput && _enteredInputs.Count < requiredCount && _roundTimer > 0f)
-        {
-            if (window > 0f)
-            {
-                elapsed += Time.deltaTime;
-                if (elapsed >= window)
-                {
-                    break;
-                }
-            }
-
-            yield return null;
-        }
-
-        _capturingInput = false;
-    }
-
-    private void OnDirectionPressed(Direction direction)
-    {
-        // Gate input: ignore presses arriving outside the input phase.
-        if (_state != GameState.PlayerInput || !_capturingInput)
+        if (teamIndex != CookingTeamIndex || !DecoratesInPan || _panToppings == null)
         {
             return;
         }
 
-        // A wrong press (doesn't match the expected step) shakes the screen.
-        int stepIndex = _enteredInputs.Count;
-        bool isWrong = _currentTarget == null
-            || stepIndex >= _currentTarget.Count
-            || _currentTarget[stepIndex] != direction;
-
-        if (isWrong)
+        int tokenCount = _sequenceRunner?.Team(CookingTeamIndex)?.Tokens.Count ?? 0;
+        if (tokenCount > 0 && slot < tokenCount)
         {
-            _hadWrongPress = true;
-            _cameraShake?.Shake();
+            _decorator.AddPiece(_panToppings, _panFrame, slot, tokenCount, true);
+        }
+    }
+
+    /// <summary>
+    /// A wrong press shakes the screen, and the mistake that spends the team's
+    /// budget scorches the pancake on the spot. The ones before it are free.
+    /// </summary>
+    private void HandleWrongPress(int teamIndex, int offendingPlayer)
+    {
+        if (teamIndex != CookingTeamIndex)
+        {
+            return;
         }
 
-        _enteredInputs.Add(direction);
-        _sequenceDisplay?.ShowInputEcho(direction);
+        _wrongPresses++;
+        _cameraShake?.Shake();
 
-        if (DecoratesInPan && _panToppings != null && _currentTarget != null && stepIndex < _currentTarget.Count)
+        if (!DecoratesInPan || _panPancake == null || _wrongPresses < _config.MistakesBeforeRuined)
         {
-            _decorator.AddPiece(_panToppings, _panFrame, stepIndex, _currentTarget.Count, !isWrong);
+            return;
+        }
 
-            // Any flubbed press scorches the pancake on the spot.
-            WaffleController panWaffle = _panPancake != null ? _panPancake.GetComponent<WaffleController>() : null;
-            if (isWrong && panWaffle != null)
-            {
-                panWaffle.SetCharLevel(0f, _config, true);
-            }
+        WaffleController panWaffle = _panPancake.GetComponent<WaffleController>();
+        if (panWaffle != null)
+        {
+            panWaffle.SetCharLevel(0f, _config, true);
+        }
+    }
+
+    private void HandleSequenceComplete(int teamIndex, int wrongPresses)
+    {
+        if (teamIndex == CookingTeamIndex)
+        {
+            // The running count is kept rather than the state's own tally: a
+            // pancake can take several attempts, and every mistake across all of
+            // them counts against it. The state's tally covers one attempt.
+            _outcome = SequenceOutcome.Completed;
+        }
+    }
+
+    private void HandleSequenceTimeout(int teamIndex)
+    {
+        if (teamIndex == CookingTeamIndex)
+        {
+            _outcome = SequenceOutcome.TimedOut;
         }
     }
 }

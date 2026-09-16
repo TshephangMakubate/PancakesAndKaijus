@@ -15,6 +15,7 @@ public class GameConfig : ScriptableObject
     private const float DefaultWrongPressPenalty = 0.5f;
     private const float DefaultExtraPressPenalty = 0.5f;
     private const int DefaultCookingRoundCount = 2;
+    private const int DefaultMistakesBeforeRuined = 3;
     private const string DefaultDecoratingSceneName = "Decorating Scene";
     private const string DefaultServingSceneName = "Serving Scene";
     private const float DefaultServingRoundSeconds = 45f;
@@ -43,6 +44,8 @@ public class GameConfig : ScriptableObject
     [Header("Scoring Penalties")]
     [SerializeField] private float _wrongPressPenalty = DefaultWrongPressPenalty;
     [SerializeField] private float _extraPressPenalty = DefaultExtraPressPenalty;
+    [Tooltip("Wrong presses a team may make on one pancake before it is ruined. Mistakes below this only cost the cherry, not the bake.")]
+    [SerializeField, Min(1)] private int _mistakesBeforeRuined = DefaultMistakesBeforeRuined;
 
     [Header("Waffle Char Colors")]
     [SerializeField] private Color _waffleRawColor = new Color(0.93f, 0.85f, 0.62f);
@@ -90,6 +93,9 @@ public class GameConfig : ScriptableObject
 
     /// <summary>Accuracy penalty applied per surplus press beyond target length.</summary>
     public float ExtraPressPenalty => _extraPressPenalty;
+
+    /// <summary>Wrong presses a team may make on one pancake before it is ruined.</summary>
+    public int MistakesBeforeRuined => Mathf.Max(1, _mistakesBeforeRuined);
 
     /// <summary>Color for a raw (unbaked) waffle.</summary>
     public Color WaffleRawColor => _waffleRawColor;

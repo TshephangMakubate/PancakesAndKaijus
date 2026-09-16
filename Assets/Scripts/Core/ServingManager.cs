@@ -3,10 +3,26 @@ using System.Collections.Generic;
 using TMPro;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.Serialization;
 
-/// <summary>Round 3: pull back and release to slide your pancake plates down the table to the customers.</summary>
+/// <summary>
+/// Round 3: every player runs their own serving station and slides pancake
+/// plates down the table to the customers, so each team has two plates in play
+/// at once. Customers eat, leave, and are replaced, so there is always someone
+/// to serve until the clock or the pancakes run out.
+/// <para>
+/// Each player uses their one button from the cooking round: the aim arrow
+/// swings on its own, holding the button charges the slide's power, and
+/// releasing it lets the plate go. A mouse drag still aims the nearest ready
+/// plate, which is handy for testing on your own.
+/// </para>
+/// </summary>
 public class ServingManager : MonoBehaviour
 {
+    private const int TeamCount = 2;
+    private const int PlayersPerTeam = 2;
+    private const int StationCount = TeamCount * PlayersPerTeam;
+
     private const float IntroSeconds = 1f;
     private const float TitleBannerSeconds = 1.8f;
     private const float GoBannerSeconds = 0.5f;
@@ -19,12 +35,14 @@ public class ServingManager : MonoBehaviour
     private const float PerfectAccuracy = 0.999f;
     private const float FloatingTextSeconds = 1.1f;
     private const float FloatingTextSize = 12f;
+    private const float KeyLabelSize = 9f;
+    private const float KeyLabelOffset = 1.35f;
     private const float AimLift = 0.35f;
+    private const float IdleArrowLength = 1.6f;
     private const float MaxLaunchSpin = 4f;
     private const string TitleMessage = "Round 3\nServe your customers!";
     private const string GoMessage = "GO!";
     private const string TimesUpMessage = "Time's up!";
-    private const string AllServedMessage = "Everyone's fed!";
     private const string OutOfPlatesMessage = "Out of pancakes!";
 
     // Unity's cylinder mesh is 2 units tall, so a Y scale of s gives a height of 2s.
@@ -38,41 +56,56 @@ public class ServingManager : MonoBehaviour
     private static readonly Color GoodTextColor = new Color(0.3f, 0.85f, 0.35f);
     private static readonly Color BadTextColor = new Color(0.9f, 0.25f, 0.2f);
     private static readonly Color NeutralTextColor = new Color(0.95f, 0.95f, 0.9f);
+    private static readonly string[] TeamNames = { "Red", "Blue" };
+    private static readonly Color[] TeamColors = { new Color(0.9f, 0.25f, 0.3f), new Color(0.3f, 0.45f, 0.95f) };
 
     [Header("Config & Presentation")]
     [SerializeField] private GameConfig _config;
+    [Tooltip("Supplies each player's button and which teams are playing.")]
+    [SerializeField] private SequenceConfig _sequenceConfig;
     [SerializeField] private HUDController _hud;
     [SerializeField] private PancakeDecorator _decorator;
 
     [Header("Table")]
-    [Tooltip("Where each of your plates waits to be slid.")]
-    [SerializeField] private Transform _launchSpot;
+    [Tooltip("One station per player, in order: Red P1, Red P2, Blue P1, Blue P2.")]
+    [SerializeField] private Transform[] _launchSpots;
     [Tooltip("Center of the table top; its forward (Z) points at the customers.")]
     [SerializeField] private Transform _tableCenter;
     [Tooltip("Half the table's width (x) and length (z).")]
-    [SerializeField] private Vector2 _tableHalfSize = new Vector2(4.5f, 12f);
+    [SerializeField] private Vector2 _tableHalfSize = new Vector2(7f, 12f);
     [SerializeField] private CustomerZone[] _customers;
-    [Tooltip("Where the other team's idle plates sit. They can be knocked around but never score.")]
-    [SerializeField] private Transform[] _opponentPlateSpots;
 
     [Header("Plates")]
     [SerializeField] private GameObject _pancakePrefab;
-    [SerializeField] private Material _teamPlateMaterial;
-    [SerializeField] private Material _opponentPlateMaterial;
+    [FormerlySerializedAs("_teamPlateMaterial")]
+    [SerializeField] private Material _redPlateMaterial;
+    [FormerlySerializedAs("_opponentPlateMaterial")]
+    [SerializeField] private Material _bluePlateMaterial;
     [SerializeField] private Material _plateWellMaterial;
     [SerializeField] private float _plateFriction = 0.12f;
     [SerializeField] private float _plateBounciness = 0.35f;
     [Tooltip("Air-hockey style slow-down; higher stops plates sooner.")]
     [SerializeField] private float _plateDrag = 0.6f;
 
-    [Header("Aiming")]
+    [Header("Button Aiming")]
+    [Tooltip("How far left or right of straight ahead the swinging arrow reaches, in degrees.")]
+    [SerializeField] private float _buttonAimAngle = 40f;
+    [Tooltip("How fast the arrow swings, in radians per second.")]
+    [SerializeField] private float _aimSwingSpeed = 2.2f;
+    [Tooltip("Seconds for the power to charge from empty to full while the button is held. It then falls back down.")]
+    [SerializeField, Min(0.1f)] private float _chargeSeconds = 1.1f;
+    [Tooltip("Releasing with less power than this (0-1) cancels the shot so the player can aim again, instead of dribbling the plate forward.")]
+    [SerializeField, Range(0f, 0.5f)] private float _cancelPower = 0.15f;
+
+    [Header("Mouse Aiming")]
     [Tooltip("Pull-back distance (world units) for a full-power slide.")]
     [SerializeField] private float _maxDragDistance = 3.5f;
-    [SerializeField] private float _minLaunchSpeed = 4f;
-    [SerializeField] private float _maxLaunchSpeed = 22f;
     [Tooltip("How far left or right of straight ahead you can aim, in degrees.")]
     [SerializeField] private float _maxAimAngle = 70f;
-    [SerializeField] private Color _aimColor = new Color(0.9f, 0.25f, 0.25f);
+
+    [Header("Slide")]
+    [SerializeField] private float _minLaunchSpeed = 4f;
+    [SerializeField] private float _maxLaunchSpeed = 22f;
 
     [Header("Scoring")]
     [SerializeField] private int _goodServePoints = 100;
@@ -80,29 +113,47 @@ public class ServingManager : MonoBehaviour
     [SerializeField] private int _burnedServePenalty = 50;
 
     [Header("Testing")]
-    [Tooltip("Plates to serve when this scene is played directly without cooking first (every third one burned).")]
+    [Tooltip("Plates per team when a team has no pancakes carried over from cooking (every third one burned).")]
     [SerializeField] private int _fallbackPlateCount = 6;
 
-    private readonly Queue<PancakeRecord> _queue = new Queue<PancakeRecord>();
+    /// <summary>One player's serving station and the plate waiting on it.</summary>
+    private sealed class Station
+    {
+        public int Index;
+        public int Team;
+        public Transform Spot;
+        public ServedPlate Ready;
+        public bool Spawning;
+        public float BlockedTime;
+
+        public float SwingPhase;
+        public bool Charging;
+        public float ChargeTime;
+        public bool WasPressed;
+        public bool MouseAiming;
+
+        public Vector3 Direction = Vector3.forward;
+        public float Power;
+
+        public Material AimMaterial;
+        public LineRenderer Arrow;
+        public LineRenderer Band;
+    }
+
+    private readonly Queue<PancakeRecord>[] _queues = { new Queue<PancakeRecord>(), new Queue<PancakeRecord>() };
+    private readonly bool[] _teamActive = new bool[TeamCount];
+    private readonly int[] _scores = new int[TeamCount];
+    private readonly int[] _servedCounts = new int[TeamCount];
+    private readonly List<Station> _stations = new List<Station>();
     private readonly List<ServedPlate> _plates = new List<ServedPlate>();
 
     private Camera _camera;
     private PhysicsMaterial _slideMaterial;
-    private Material _aimMaterial;
-    private LineRenderer _aimArrow;
-    private LineRenderer _aimBand;
-
-    private ServedPlate _readyPlate;
-    private bool _spawning;
-    private float _spotBlockedTime;
-    private bool _aiming;
-    private Vector3 _pendingDirection = Vector3.forward;
-    private float _pendingPower;
+    private SequenceInputBinder _input;
+    private Station _mouseStation;
 
     private bool _roundActive;
     private float _roundTimer;
-    private int _score;
-    private int _servedCount;
 
     private Vector3 TableForward
     {
@@ -114,26 +165,19 @@ public class ServingManager : MonoBehaviour
         }
     }
 
-    private int PlatesLeft => _queue.Count + (_readyPlate != null ? 1 : 0) + (_spawning ? 1 : 0);
-
-    private bool AllCustomersServed
+    private bool AnyPlatesLeft
     {
         get
         {
-            if (_customers == null || _customers.Length == 0)
+            for (int team = 0; team < TeamCount; team++)
             {
-                return false;
-            }
-
-            foreach (CustomerZone customer in _customers)
-            {
-                if (customer != null && !customer.IsServed)
+                if (_teamActive[team] && PlatesLeft(team) > 0)
                 {
-                    return false;
+                    return true;
                 }
             }
 
-            return true;
+            return false;
         }
     }
 
@@ -165,8 +209,26 @@ public class ServingManager : MonoBehaviour
             bounceCombine = PhysicsMaterialCombine.Maximum
         };
 
-        CreateAimVisuals();
         StartCoroutine(RunServing());
+    }
+
+    private void OnDestroy()
+    {
+        _input?.Dispose();
+        _input = null;
+
+        if (_customers == null)
+        {
+            return;
+        }
+
+        foreach (CustomerZone customer in _customers)
+        {
+            if (customer != null)
+            {
+                customer.BecameAvailable -= OnCustomerAvailable;
+            }
+        }
     }
 
     private void Update()
@@ -179,20 +241,46 @@ public class ServingManager : MonoBehaviour
         _roundTimer = Mathf.Max(0f, _roundTimer - Time.deltaTime);
         _hud?.SetTimer(_roundTimer);
 
-        TrySpawnNextPlate();
-        HandleAiming();
+        foreach (Station station in _stations)
+        {
+            TrySpawnNextPlate(station);
+            UpdateButtonAim(station);
+        }
+
+        HandleMouseAiming();
     }
 
     private IEnumerator RunServing()
     {
-        if (_config == null || _launchSpot == null || _tableCenter == null)
+        if (_config == null || _tableCenter == null || _launchSpots == null || _launchSpots.Length < StationCount)
         {
-            Debug.LogError("ServingManager: Config, launch spot, and table center must all be assigned.");
+            Debug.LogError("ServingManager: Config, table center and four launch spots must be assigned. Re-run Waffle Party > Create Serving Scene.");
             yield break;
         }
 
-        FillQueue();
-        SpawnOpponentPlates();
+        if (_sequenceConfig == null)
+        {
+            Debug.LogWarning("ServingManager: No SequenceConfig assigned, so only gamepads (and the mouse) can serve.");
+        }
+
+        _teamActive[0] = _sequenceConfig == null || _sequenceConfig.IsTeamActive(0);
+        _teamActive[1] = _sequenceConfig != null && _sequenceConfig.IsTeamActive(1);
+
+        BuildStations();
+        FillQueues();
+
+        if (_customers != null)
+        {
+            foreach (CustomerZone customer in _customers)
+            {
+                if (customer != null)
+                {
+                    customer.BecameAvailable += OnCustomerAvailable;
+                }
+            }
+        }
+
+        _input = new SequenceInputBinder(_sequenceConfig);
 
         _hud?.SetRound(_config.RoundCount, _config.DisplayedRoundCount);
         _hud?.SetTimer(_config.ServingRoundSeconds);
@@ -207,17 +295,18 @@ public class ServingManager : MonoBehaviour
 
         _roundTimer = _config.ServingRoundSeconds;
         _roundActive = true;
+        _input.Enable();
 
-        while (_roundTimer > 0f && !AllCustomersServed && (PlatesLeft > 0 || AnyPlateSliding))
+        while (_roundTimer > 0f && (AnyPlatesLeft || AnyPlateSliding))
         {
             yield return null;
         }
 
         _roundActive = false;
-        CancelAim();
+        _input.Disable();
+        CancelAllAims();
 
-        string ending = AllCustomersServed ? AllServedMessage : _roundTimer <= 0f ? TimesUpMessage : OutOfPlatesMessage;
-        _hud?.ShowBanner(ending);
+        _hud?.ShowBanner(_roundTimer <= 0f ? TimesUpMessage : OutOfPlatesMessage);
 
         // Plates still sliding when the round ends get to finish and score.
         float grace = 0f;
@@ -231,70 +320,124 @@ public class ServingManager : MonoBehaviour
         ShowResults();
     }
 
-    private void FillQueue()
+    /// <summary>
+    /// Sets up a station per player on an active team. A team sitting out
+    /// leaves idle plates on its pads instead: obstacles that can be knocked
+    /// about but never score.
+    /// </summary>
+    private void BuildStations()
     {
-        _queue.Clear();
+        _stations.Clear();
 
-        if (!PancakeCarryover.HasData)
+        for (int i = 0; i < StationCount; i++)
         {
-            Debug.Log($"ServingManager: No pancakes carried over from cooking; using {_fallbackPlateCount} test plates.");
+            Transform spot = _launchSpots[i];
+            int team = i / PlayersPerTeam;
+            if (spot == null)
+            {
+                continue;
+            }
+
+            if (!_teamActive[team])
+            {
+                BuildPlate(spot.position, PlateMaterial(team), new PancakeRecord(1f, false), -1);
+                continue;
+            }
+
+            var station = new Station
+            {
+                Index = i,
+                Team = team,
+                Spot = spot,
+                // Offset the swings so teammates' arrows don't move in lockstep.
+                SwingPhase = i * 1.3f
+            };
+
+            station.AimMaterial = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
+            station.AimMaterial.SetColor(BaseColorId, TeamColors[team]);
+            station.Arrow = CreateLine($"AimArrow{i + 1}", 5, 0.16f, station.AimMaterial);
+            station.Band = CreateLine($"AimBand{i + 1}", 2, 0.05f, station.AimMaterial);
+
+            CreateKeyLabel(station);
+            _stations.Add(station);
+        }
+    }
+
+    private void FillQueues()
+    {
+        for (int team = 0; team < TeamCount; team++)
+        {
+            _queues[team].Clear();
+            if (!_teamActive[team])
+            {
+                continue;
+            }
+
+            // Only team A cooks in this build, so the carried-over stack is theirs.
+            if (team == 0 && PancakeCarryover.HasData)
+            {
+                IReadOnlyList<PancakeRecord> pancakes = PancakeCarryover.Pancakes;
+                for (int i = pancakes.Count - 1; i >= 0; i--)
+                {
+                    _queues[team].Enqueue(pancakes[i]);
+                }
+
+                continue;
+            }
+
+            Debug.Log($"ServingManager: No pancakes carried over for team {TeamNames[team]}; using {_fallbackPlateCount} test plates.");
             for (int i = 0; i < _fallbackPlateCount; i++)
             {
-                _queue.Enqueue(new PancakeRecord(1f, i % 3 == 2));
+                _queues[team].Enqueue(new PancakeRecord(1f, i % 3 == 2));
             }
-
-            return;
-        }
-
-        // Serve from the top of the stack down.
-        IReadOnlyList<PancakeRecord> pancakes = PancakeCarryover.Pancakes;
-        for (int i = pancakes.Count - 1; i >= 0; i--)
-        {
-            _queue.Enqueue(pancakes[i]);
         }
     }
 
-    private void SpawnOpponentPlates()
+    private int PlatesLeft(int team)
     {
-        if (_opponentPlateSpots == null)
+        int count = _queues[team].Count;
+        foreach (Station station in _stations)
         {
-            return;
-        }
-
-        foreach (Transform spot in _opponentPlateSpots)
-        {
-            if (spot != null)
+            if (station.Team == team && (station.Ready != null || station.Spawning))
             {
-                BuildPlate(spot.position, _opponentPlateMaterial, new PancakeRecord(1f, false));
+                count++;
             }
         }
+
+        return count;
     }
 
-    private void TrySpawnNextPlate()
+    private Material PlateMaterial(int team)
     {
-        if (_readyPlate != null || _spawning || _queue.Count == 0)
+        return team == 0 ? _redPlateMaterial : _bluePlateMaterial;
+    }
+
+    private void TrySpawnNextPlate(Station station)
+    {
+        if (station.Ready != null || station.Spawning || _queues[station.Team].Count == 0)
         {
             return;
         }
 
-        if (!IsLaunchSpotClear())
+        if (!IsSpotClear(station.Spot.position))
         {
-            _spotBlockedTime += Time.deltaTime;
-            if (_spotBlockedTime < BlockedSpotSpawnSeconds)
+            station.BlockedTime += Time.deltaTime;
+            if (station.BlockedTime < BlockedSpotSpawnSeconds)
             {
                 return;
             }
         }
 
-        _spotBlockedTime = 0f;
-        StartCoroutine(SpawnReadyPlate(_queue.Dequeue()));
+        station.BlockedTime = 0f;
+        StartCoroutine(SpawnReadyPlate(station, _queues[station.Team].Dequeue()));
     }
 
-    private IEnumerator SpawnReadyPlate(PancakeRecord record)
+    private IEnumerator SpawnReadyPlate(Station station, PancakeRecord record)
     {
-        _spawning = true;
+        station.Spawning = true;
+        _plates.RemoveAll(p => p == null);
 
-        ServedPlate plate = BuildPlate(_launchSpot.position, _teamPlateMaterial, record);
+        ServedPlate plate = BuildPlate(station.Spot.position, PlateMaterial(station.Team), record, station.Team);
         plate.GetComponent<Rigidbody>().isKinematic = true;
         plate.Settled += OnPlateSettled;
         plate.FellOff += OnPlateFellOff;
@@ -302,17 +445,16 @@ public class ServingManager : MonoBehaviour
 
         yield return JuiceTweens.PopIn(plate.transform, Vector3.one, PlatePopSeconds);
 
-        _readyPlate = plate;
-        _spawning = false;
+        station.Ready = plate;
+        station.Spawning = false;
         UpdateHud();
     }
 
-    private bool IsLaunchSpotClear()
+    private bool IsSpotClear(Vector3 spot)
     {
-        Vector3 spot = _launchSpot.position;
         foreach (ServedPlate plate in _plates)
         {
-            if (plate == null || plate == _readyPlate || plate.IsGone)
+            if (plate == null || plate.IsGone || IsReadyPlate(plate))
             {
                 continue;
             }
@@ -328,7 +470,20 @@ public class ServingManager : MonoBehaviour
         return true;
     }
 
-    private ServedPlate BuildPlate(Vector3 position, Material rimMaterial, PancakeRecord record)
+    private bool IsReadyPlate(ServedPlate plate)
+    {
+        foreach (Station station in _stations)
+        {
+            if (station.Ready == plate)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private ServedPlate BuildPlate(Vector3 position, Material rimMaterial, PancakeRecord record, int team)
     {
         var root = new GameObject("ServingPlate");
         root.transform.position = position;
@@ -376,52 +531,166 @@ public class ServingManager : MonoBehaviour
         _decorator?.DecorateTopDown(toppings, PancakeRadius, !record.Burned, perfect);
 
         ServedPlate plate = root.AddComponent<ServedPlate>();
-        plate.Init(record, _tableCenter.position, _tableHalfSize);
+        plate.Init(record, _tableCenter.position, _tableHalfSize, team);
         return plate;
     }
 
-    private void HandleAiming()
+    /// <summary>
+    /// One-button aiming: the arrow swings until the player presses, then the
+    /// direction locks and power rises and falls while the button is held.
+    /// Letting go slides the plate.
+    /// </summary>
+    private void UpdateButtonAim(Station station)
     {
-        Pointer pointer = Pointer.current;
-        if (_readyPlate == null || pointer == null)
+        PlayerButtonInput input = _input?.Player(station.Index);
+        bool pressed = input != null && input.IsPressed;
+        bool pressedThisFrame = pressed && !station.WasPressed;
+        station.WasPressed = pressed;
+
+        if (station.MouseAiming)
         {
-            CancelAim();
             return;
         }
 
-        if (!_aiming)
+        if (station.Ready == null)
         {
-            if (!pointer.press.wasPressedThisFrame)
+            station.Charging = false;
+            HideAim(station);
+            return;
+        }
+
+        if (!station.Charging)
+        {
+            station.SwingPhase += Time.deltaTime * _aimSwingSpeed;
+            float angle = Mathf.Sin(station.SwingPhase) * _buttonAimAngle;
+            station.Direction = Quaternion.AngleAxis(angle, Vector3.up) * TableForward;
+            station.Power = 0f;
+
+            if (pressedThisFrame)
+            {
+                station.Charging = true;
+                station.ChargeTime = 0f;
+            }
+        }
+
+        if (station.Charging)
+        {
+            station.ChargeTime += Time.deltaTime;
+            station.Power = Mathf.PingPong(station.ChargeTime / _chargeSeconds, 1f);
+
+            if (!pressed)
+            {
+                station.Charging = false;
+
+                // Letting go while the arrow is tiny calls the shot off, and the
+                // arrow picks up swinging from where it was locked.
+                if (station.Power < _cancelPower)
+                {
+                    station.Power = 0f;
+                }
+                else
+                {
+                    LaunchReadyPlate(station, station.Direction, station.Power);
+                    HideAim(station);
+                    return;
+                }
+            }
+        }
+
+        ShowArrow(station, station.Ready.transform.position);
+    }
+
+    /// <summary>Slingshot drag with the mouse, grabbing whichever ready plate is nearest the click.</summary>
+    private void HandleMouseAiming()
+    {
+        Pointer pointer = Pointer.current;
+        if (pointer == null)
+        {
+            return;
+        }
+
+        if (_mouseStation == null)
+        {
+            if (!pointer.press.wasPressedThisFrame || !TryGetTablePoint(pointer.position.ReadValue(), out Vector3 click))
             {
                 return;
             }
 
-            _aiming = true;
-            _pendingPower = 0f;
+            _mouseStation = NearestReadyStation(click);
+            if (_mouseStation == null)
+            {
+                return;
+            }
+
+            _mouseStation.MouseAiming = true;
+            _mouseStation.Power = 0f;
         }
 
-        Vector3 origin = _readyPlate.transform.position;
+        Station station = _mouseStation;
+        if (station.Ready == null)
+        {
+            EndMouseAim();
+            return;
+        }
+
+        Vector3 origin = station.Ready.transform.position;
         if (TryGetTablePoint(pointer.position.ReadValue(), out Vector3 grab))
         {
-            UpdatePendingShot(origin, grab);
-            ShowAim(origin, grab);
+            UpdatePendingShot(station, origin, grab);
+            ShowArrow(station, origin);
+            ShowBand(station, origin, grab);
         }
 
         if (!pointer.press.isPressed)
         {
-            Vector3 direction = _pendingDirection;
-            float power = _pendingPower;
-            CancelAim();
+            Vector3 direction = station.Direction;
+            float power = station.Power;
+            EndMouseAim();
 
             if (power >= MinLaunchPower)
             {
-                LaunchReadyPlate(direction, power);
+                LaunchReadyPlate(station, direction, power);
             }
         }
     }
 
+    private Station NearestReadyStation(Vector3 point)
+    {
+        Station nearest = null;
+        float best = float.MaxValue;
+
+        foreach (Station station in _stations)
+        {
+            if (station.Ready == null || station.Charging)
+            {
+                continue;
+            }
+
+            float distance = (station.Ready.transform.position - point).sqrMagnitude;
+            if (distance < best)
+            {
+                best = distance;
+                nearest = station;
+            }
+        }
+
+        return nearest;
+    }
+
+    private void EndMouseAim()
+    {
+        if (_mouseStation != null)
+        {
+            _mouseStation.MouseAiming = false;
+            _mouseStation.Power = 0f;
+            HideAim(_mouseStation);
+        }
+
+        _mouseStation = null;
+    }
+
     /// <summary>Slingshot aim: the plate flies opposite to where you pull, within the allowed aim cone.</summary>
-    private void UpdatePendingShot(Vector3 origin, Vector3 grab)
+    private void UpdatePendingShot(Station station, Vector3 origin, Vector3 grab)
     {
         Vector3 forward = TableForward;
         Vector3 pull = origin - grab;
@@ -429,19 +698,19 @@ public class ServingManager : MonoBehaviour
 
         if (Vector3.Dot(pull, forward) <= 0f)
         {
-            _pendingPower = 0f;
+            station.Power = 0f;
             return;
         }
 
         float angle = Mathf.Clamp(Vector3.SignedAngle(forward, pull, Vector3.up), -_maxAimAngle, _maxAimAngle);
-        _pendingDirection = Quaternion.AngleAxis(angle, Vector3.up) * forward;
-        _pendingPower = Mathf.Clamp01(pull.magnitude / _maxDragDistance);
+        station.Direction = Quaternion.AngleAxis(angle, Vector3.up) * forward;
+        station.Power = Mathf.Clamp01(pull.magnitude / _maxDragDistance);
     }
 
-    private void LaunchReadyPlate(Vector3 direction, float power)
+    private void LaunchReadyPlate(Station station, Vector3 direction, float power)
     {
-        ServedPlate plate = _readyPlate;
-        _readyPlate = null;
+        ServedPlate plate = station.Ready;
+        station.Ready = null;
 
         float speed = Mathf.Lerp(_minLaunchSpeed, _maxLaunchSpeed, power);
         plate.Launch(direction * speed, Random.Range(-MaxLaunchSpin, MaxLaunchSpin));
@@ -469,7 +738,7 @@ public class ServingManager : MonoBehaviour
 
     private void OnPlateSettled(ServedPlate plate)
     {
-        if (plate.IsClaimed)
+        if (plate.IsClaimed || plate.TeamIndex < 0)
         {
             return;
         }
@@ -487,23 +756,46 @@ public class ServingManager : MonoBehaviour
             return;
         }
 
-        if (customer.IsServed)
+        if (!customer.IsAvailable)
         {
-            ShowFloatingText(position, "Full!", NeutralTextColor);
+            // It waits there; the next customer to sit down takes it.
+            ShowFloatingText(position, "Busy!", NeutralTextColor);
             return;
         }
 
+        ServeTo(plate, customer);
+    }
+
+    /// <summary>A freshly seated customer takes any plate already waiting in their spot.</summary>
+    private void OnCustomerAvailable(CustomerZone customer)
+    {
+        foreach (ServedPlate plate in _plates)
+        {
+            if (plate != null && plate.TeamIndex >= 0 && plate.IsLaunched && plate.IsSettled
+                && !plate.IsClaimed && !plate.IsGone && customer.Contains(plate.transform.position))
+            {
+                ServeTo(plate, customer);
+                return;
+            }
+        }
+    }
+
+    private void ServeTo(ServedPlate plate, CustomerZone customer)
+    {
         PancakeRecord record = plate.Record;
         bool good = WaffleController.IsCooked(record.Accuracy, record.Burned);
         bool perfect = good && record.Accuracy >= PerfectAccuracy;
         int points = good ? _goodServePoints + (perfect ? _perfectBonus : 0) : -_burnedServePenalty;
 
         plate.Claim();
-        customer.Serve(good);
-        _servedCount++;
-        _score += points;
+        customer.Serve(good, plate);
+
+        int team = plate.TeamIndex;
+        _servedCounts[team]++;
+        _scores[team] += points;
         UpdateHud();
 
+        Vector3 position = plate.transform.position;
         string label = good ? (perfect ? $"+{points} Perfect!" : $"+{points}") : $"{points} Yuck!";
         ShowFloatingText(position, label, good ? GoodTextColor : BadTextColor);
     }
@@ -536,13 +828,17 @@ public class ServingManager : MonoBehaviour
 
     private void UpdateHud()
     {
-        _hud?.SetPlatesLeft(PlatesLeft);
-        _hud?.SetScore(_score);
+        for (int team = 0; team < TeamCount; team++)
+        {
+            if (_teamActive[team])
+            {
+                _hud?.SetTeamServing(team, TeamNames[team], _scores[team], PlatesLeft(team));
+            }
+        }
     }
 
     private void ShowResults()
     {
-        int customerCount = _customers != null ? _customers.Length : 0;
         string results = "Game Over!\n";
 
         PlayerSession session = PancakeCarryover.Session;
@@ -552,19 +848,25 @@ public class ServingManager : MonoBehaviour
             results += $"Waffles Made: {session.TotalWaffles}\nCook Accuracy: {accuracyPct}%\n";
         }
 
-        results += $"Customers Served: {_servedCount}/{customerCount}\nServing Score: {_score}";
-        _hud?.ShowMessage(results);
+        for (int team = 0; team < TeamCount; team++)
+        {
+            if (_teamActive[team])
+            {
+                results += $"{TeamNames[team]}: {_servedCounts[team]} served, {_scores[team]} pts\n";
+            }
+        }
+
+        if (_teamActive[0] && _teamActive[1])
+        {
+            results += _scores[0] == _scores[1]
+                ? "It's a tie!"
+                : $"{TeamNames[_scores[0] > _scores[1] ? 0 : 1]} team wins!";
+        }
+
+        _hud?.ShowMessage(results.TrimEnd('\n'));
     }
 
-    private void CreateAimVisuals()
-    {
-        _aimMaterial = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
-        _aimMaterial.SetColor(BaseColorId, _aimColor);
-        _aimArrow = CreateLine("AimArrow", 5, 0.16f);
-        _aimBand = CreateLine("AimBand", 2, 0.05f);
-    }
-
-    private LineRenderer CreateLine(string lineName, int points, float width)
+    private LineRenderer CreateLine(string lineName, int points, float width, Material material)
     {
         var lineObject = new GameObject(lineName);
         lineObject.transform.SetParent(transform, false);
@@ -572,7 +874,7 @@ public class ServingManager : MonoBehaviour
         LineRenderer line = lineObject.AddComponent<LineRenderer>();
         line.positionCount = points;
         line.widthMultiplier = width;
-        line.sharedMaterial = _aimMaterial;
+        line.sharedMaterial = material;
         line.numCornerVertices = 2;
         line.numCapVertices = 2;
         line.useWorldSpace = true;
@@ -581,48 +883,81 @@ public class ServingManager : MonoBehaviour
         return line;
     }
 
-    private void ShowAim(Vector3 origin, Vector3 grab)
+    /// <summary>The direction arrow, growing and deepening in colour with power.</summary>
+    private void ShowArrow(Station station, Vector3 origin)
+    {
+        Vector3 start = origin + Vector3.up * AimLift;
+        Vector3 direction = station.Direction;
+        float length = IdleArrowLength + station.Power * 4f;
+
+        Vector3 tip = start + direction * length;
+        Vector3 back = -direction * 0.6f;
+        Vector3 side = Vector3.Cross(Vector3.up, direction) * 0.45f;
+
+        station.Arrow.enabled = true;
+        station.Arrow.SetPosition(0, start);
+        station.Arrow.SetPosition(1, tip);
+        station.Arrow.SetPosition(2, tip + back + side);
+        station.Arrow.SetPosition(3, tip);
+        station.Arrow.SetPosition(4, tip + back - side);
+        station.AimMaterial.SetColor(BaseColorId, Color.Lerp(Color.white, TeamColors[station.Team], 0.35f + station.Power * 0.65f));
+    }
+
+    /// <summary>The rubber band from the plate back to the mouse.</summary>
+    private static void ShowBand(Station station, Vector3 origin, Vector3 grab)
     {
         Vector3 lift = Vector3.up * AimLift;
-        Vector3 start = origin + lift;
+        station.Band.enabled = true;
+        station.Band.SetPosition(0, origin + lift);
+        station.Band.SetPosition(1, new Vector3(grab.x, origin.y, grab.z) + lift);
+    }
 
-        _aimBand.enabled = true;
-        _aimBand.SetPosition(0, start);
-        _aimBand.SetPosition(1, new Vector3(grab.x, origin.y, grab.z) + lift);
+    private static void HideAim(Station station)
+    {
+        if (station.Arrow != null)
+        {
+            station.Arrow.enabled = false;
+        }
 
-        bool hasShot = _pendingPower > 0f;
-        _aimArrow.enabled = hasShot;
-        if (!hasShot)
+        if (station.Band != null)
+        {
+            station.Band.enabled = false;
+        }
+    }
+
+    private void CancelAllAims()
+    {
+        EndMouseAim();
+        foreach (Station station in _stations)
+        {
+            station.Charging = false;
+            station.Power = 0f;
+            HideAim(station);
+        }
+    }
+
+    /// <summary>Paints the player's button in front of their pad, in their team colour.</summary>
+    private void CreateKeyLabel(Station station)
+    {
+        string key = _sequenceConfig != null ? _sequenceConfig.KeyFor(station.Index) : string.Empty;
+        int slash = key.LastIndexOf('/');
+        string label = slash >= 0 ? key.Substring(slash + 1).ToUpperInvariant() : key.ToUpperInvariant();
+        if (string.IsNullOrEmpty(label))
         {
             return;
         }
 
-        Vector3 tip = start + _pendingDirection * (1f + _pendingPower * 4f);
-        Vector3 back = -_pendingDirection * 0.6f;
-        Vector3 side = Vector3.Cross(Vector3.up, _pendingDirection) * 0.45f;
+        var labelObject = new GameObject($"KeyLabel{station.Index + 1}");
+        TextMeshPro text = labelObject.AddComponent<TextMeshPro>();
+        labelObject.transform.position = station.Spot.position - TableForward * KeyLabelOffset + Vector3.up * 0.03f;
+        labelObject.transform.rotation = Quaternion.LookRotation(Vector3.down, TableForward);
 
-        _aimArrow.SetPosition(0, start);
-        _aimArrow.SetPosition(1, tip);
-        _aimArrow.SetPosition(2, tip + back + side);
-        _aimArrow.SetPosition(3, tip);
-        _aimArrow.SetPosition(4, tip + back - side);
-        _aimMaterial.SetColor(BaseColorId, Color.Lerp(Color.white, _aimColor, _pendingPower));
-    }
-
-    private void CancelAim()
-    {
-        _aiming = false;
-        _pendingPower = 0f;
-
-        if (_aimArrow != null)
-        {
-            _aimArrow.enabled = false;
-        }
-
-        if (_aimBand != null)
-        {
-            _aimBand.enabled = false;
-        }
+        text.text = label;
+        text.fontSize = KeyLabelSize;
+        text.fontStyle = FontStyles.Bold;
+        text.alignment = TextAlignmentOptions.Center;
+        text.color = TeamColors[station.Team];
+        text.rectTransform.sizeDelta = new Vector2(3f, 1.5f);
     }
 
     private void ShowFloatingText(Vector3 position, string message, Color color)

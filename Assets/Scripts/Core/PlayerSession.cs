@@ -32,6 +32,16 @@ public class PlayerSession
         Input = input;
     }
 
+    /// <summary>
+    /// Creates a session with no directional reader, for modes whose input
+    /// arrives elsewhere — such as the co-op sequence mechanic, where presses
+    /// are routed through <see cref="SequenceMatchRunner"/>.
+    /// </summary>
+    public PlayerSession(int playerId)
+        : this(playerId, null)
+    {
+    }
+
     /// <summary>Cumulative average accuracy across all waffles produced.</summary>
     public float CumulativeAccuracy => _accuracySamples > 0 ? _accuracyTotal / _accuracySamples : 0f;
 
